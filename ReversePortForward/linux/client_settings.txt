@@ -1,0 +1,31 @@
+# Reverse Port Forwarder Settings — CLIENT mode
+# Lines starting with '#' are comments
+
+mode=client
+
+# Server to connect to (the reverse port forward server)
+server_address=192.168.56.101
+server_port=9000
+reconnect_interval=5
+
+# Global settings
+max_threads=200
+buffer_size=65536
+connect_timeout=10
+recv_timeout=60
+logging=1
+log_file=client.log
+
+# Forwarding rules (one per line):
+#   RemotePort:LocalAddress:LocalPort
+#
+# This means: "Ask the server to listen on RemotePort, and when
+# someone connects there, forward traffic to LocalAddress:LocalPort
+# which is reachable from THIS client machine."
+#
+# Similar to: ssh -R RemotePort:LocalAddress:LocalPort user@server
+
+[rules]
+8080:127.0.0.1:80
+2222:127.0.0.1:22
+9443:127.0.0.1:443

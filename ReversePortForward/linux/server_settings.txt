@@ -1,0 +1,16 @@
+# Reverse Port Forwarder Settings — SERVER mode
+# Lines starting with '#' are comments
+
+mode=server
+
+# Control port where clients connect to register forwarding rules
+listen_address=0.0.0.0
+listen_port=9000
+
+# Global settings
+max_threads=200
+buffer_size=65536
+connect_timeout=10
+recv_timeout=60
+logging=1
+log_file=server.log
