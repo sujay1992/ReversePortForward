@@ -368,6 +368,7 @@ struct ServerForwardCtx {
     int    remote_port;
     SOCKET control_sock;  // control channel back to client
     CRITICAL_SECTION* control_cs;  // mutex for sending on control channel
+    SOCKET listen_sock;   // set by the listener thread, closed by cleanup to unblock accept()
 };
 
 // Thread: accepts incoming connections on a forwarded port
@@ -376,13 +377,15 @@ static DWORD WINAPI server_forward_listener(LPVOID param) {
     int remote_port = ctx->remote_port;
     SOCKET control = ctx->control_sock;
     CRITICAL_SECTION* control_cs = ctx->control_cs;
-    delete ctx;
+    // Note: do NOT delete ctx here; the client handler owns it and uses ctx->listen_sock
 
     SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listen_sock == INVALID_SOCKET) {
         log_msg("[S:%d] socket() failed: %d", remote_port, WSAGetLastError());
+        ctx->listen_sock = INVALID_SOCKET;
         return 1;
     }
+    ctx->listen_sock = listen_sock;  // publish so cleanup can close it
 
     int opt = 1;
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
@@ -467,7 +470,11 @@ static DWORD WINAPI server_forward_listener(LPVOID param) {
         // (This is handled in the data accept thread)
     }
 
-    closesocket(listen_sock);
+    // Only close if not already closed by cleanup
+    if (ctx->listen_sock != INVALID_SOCKET) {
+        closesocket(ctx->listen_sock);
+        ctx->listen_sock = INVALID_SOCKET;
+    }
     log_msg("[S:%d] Forward listener stopped", remote_port);
     return 0;
 }
@@ -521,6 +528,7 @@ static DWORD WINAPI server_client_handler(LPVOID param) {
 
     // Phase 1: Receive FORWARD rules, then READY
     std::vector<HANDLE> listener_handles;
+    std::vector<ServerForwardCtx*> listener_ctxs;
 
     while (true) {
         std::string line;
@@ -557,10 +565,12 @@ static DWORD WINAPI server_client_handler(LPVOID param) {
             fctx->remote_port = rport;
             fctx->control_sock = control;
             fctx->control_cs = &control_cs;
+            fctx->listen_sock = INVALID_SOCKET;
 
             HANDLE h = CreateThread(nullptr, 0, server_forward_listener, fctx, 0, nullptr);
             if (h) {
                 listener_handles.push_back(h);
+                listener_ctxs.push_back(fctx);
             }
             else {
                 log_msg("[S] Failed to create listener thread for port %d", rport);
@@ -600,13 +610,26 @@ static DWORD WINAPI server_client_handler(LPVOID param) {
 cleanup:
     close_socket(control);
 
-    // TODO: Ideally we'd signal listener threads to stop.
-    // For now they'll fail on the next send_all to control and exit.
-    // Wait a bit for them to notice.
+    // Close all forwarded listening sockets to unblock accept() and free ports
+    for (size_t i = 0; i < listener_ctxs.size(); i++) {
+        if (listener_ctxs[i]->listen_sock != INVALID_SOCKET) {
+            log_msg("[S] Closing forwarded port %d", listener_ctxs[i]->remote_port);
+            closesocket(listener_ctxs[i]->listen_sock);
+            listener_ctxs[i]->listen_sock = INVALID_SOCKET;
+        }
+    }
+
+    // Wait for listener threads to exit
     if (!listener_handles.empty()) {
         WaitForMultipleObjects((DWORD)listener_handles.size(),
             listener_handles.data(), TRUE, 5000);
-        for (HANDLE h : listener_handles) CloseHandle(h);
+        for (size_t i = 0; i < listener_handles.size(); i++)
+            CloseHandle(listener_handles[i]);
+    }
+
+    // Free listener contexts
+    for (size_t i = 0; i < listener_ctxs.size(); i++) {
+        delete listener_ctxs[i];
     }
 
     DeleteCriticalSection(&control_cs);
@@ -1070,7 +1093,7 @@ int main(int argc, char* argv[]) {
 
     int ret;
     if (g_settings.mode == "server") {
-        log_msg("=== Reverse Port Forwarder - SERVER mode ===");
+        log_msg("=== Reverse Port Forwarder — SERVER mode ===");
         ret = run_server();
     }
     else if (g_settings.mode == "client") {

@@ -370,6 +370,7 @@ struct ServerForwardCtx {
     int            remote_port;
     int            control_sock;
     pthread_mutex_t* control_mutex;
+    int            listen_sock;   // set by the listener thread, closed by cleanup to unblock accept()
 };
 
 static void* server_forward_listener(void* param) {
@@ -377,13 +378,15 @@ static void* server_forward_listener(void* param) {
     int remote_port         = ctx->remote_port;
     int control             = ctx->control_sock;
     pthread_mutex_t* cmutex = ctx->control_mutex;
-    delete ctx;
+    // Note: do NOT delete ctx here; the client handler owns it and uses ctx->listen_sock
 
     int listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listen_sock < 0) {
         log_msg("[S:%d] socket() failed: %s", remote_port, strerror(errno));
+        ctx->listen_sock = -1;
         return (void*)1;
     }
+    ctx->listen_sock = listen_sock;  // publish so cleanup can close it
 
     int opt = 1;
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -460,7 +463,11 @@ static void* server_forward_listener(void* param) {
         }
     }
 
-    close(listen_sock);
+    // Only close if not already closed by cleanup
+    if (ctx->listen_sock >= 0) {
+        close(ctx->listen_sock);
+        ctx->listen_sock = -1;
+    }
     log_msg("[S:%d] Forward listener stopped", remote_port);
     return nullptr;
 }
@@ -513,6 +520,7 @@ static void* server_client_handler(void* param) {
 
     // Phase 1: Receive FORWARD rules, then READY
     std::vector<pthread_t> listener_tids;
+    std::vector<ServerForwardCtx*> listener_ctxs;
 
     while (true) {
         std::string line;
@@ -547,10 +555,12 @@ static void* server_client_handler(void* param) {
             fctx->remote_port   = rport;
             fctx->control_sock  = control;
             fctx->control_mutex = &control_mutex;
+            fctx->listen_sock   = -1;
 
             pthread_t tid;
             if (pthread_create(&tid, nullptr, server_forward_listener, fctx) == 0) {
                 listener_tids.push_back(tid);
+                listener_ctxs.push_back(fctx);
             } else {
                 log_msg("[S] Failed to create listener thread for port %d", rport);
                 delete fctx;
@@ -582,12 +592,27 @@ static void* server_client_handler(void* param) {
 cleanup:
     close_socket(control);
 
-    // Wait for listener threads to notice and exit
-    for (pthread_t tid : listener_tids) {
+    // Close all forwarded listening sockets to unblock accept() and free ports
+    for (size_t i = 0; i < listener_ctxs.size(); i++) {
+        if (listener_ctxs[i]->listen_sock >= 0) {
+            log_msg("[S] Closing forwarded port %d", listener_ctxs[i]->remote_port);
+            shutdown(listener_ctxs[i]->listen_sock, SHUT_RDWR);
+            close(listener_ctxs[i]->listen_sock);
+            listener_ctxs[i]->listen_sock = -1;
+        }
+    }
+
+    // Wait for listener threads to exit
+    for (size_t i = 0; i < listener_tids.size(); i++) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += 5;
-        pthread_timedjoin_np(tid, nullptr, &ts);
+        pthread_timedjoin_np(listener_tids[i], nullptr, &ts);
+    }
+
+    // Free listener contexts
+    for (size_t i = 0; i < listener_ctxs.size(); i++) {
+        delete listener_ctxs[i];
     }
 
     pthread_mutex_destroy(&control_mutex);
