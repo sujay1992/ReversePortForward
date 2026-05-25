@@ -6,10 +6,10 @@ A multithreaded reverse port forwarder written in C++ that works like SSH revers
 
 | File | Description |
 |------|-------------|
-| `ReversePortForward.cpp` | Windows implementation (Winsock2, Win32 threads) |
-| `reverse_port_forward_linux.cpp` | Linux implementation (POSIX sockets, pthreads) |
-| Settings file (server) | Server mode configuration |
-| Settings file (client) | Client mode configuration with forwarding rules |
+| `windows/ReversePortForward/ReversePortForward.cpp` | Windows implementation (Winsock2, Win32 threads) |
+| `linux/reverse_port_forward_linux.cpp` | Linux implementation (POSIX sockets, pthreads) |
+| `*server_settings.txt` | Server mode configuration |
+| `*client_settings.txt` | Client mode configuration with forwarding rules |
 
 ## How It Works
 
